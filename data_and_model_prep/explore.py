@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import duckdb
+import matplotlib.pyplot as plt
 
 os.chdir(Path(__file__).parent)
 con = duckdb.connect("data/warehouse.duckdb")
@@ -76,3 +77,67 @@ print(con.sql("""
     -- Oldest year first.
 """))
 
+lines = Path("data/raw/ons/cpi_annual_rate_D7G7.csv").read_text(encoding="utf-8").splitlines()
+print(len(lines))
+
+for line in lines[0:12] + lines[43:48] + lines[193:198] + lines[-3:]:
+    print(line)
+
+print(con.sql("""
+    SELECT
+    -- the three numbers to work out
+        count(*) AS months_checked,
+        -- every month that passes the WHERE below
+        count(*) FILTER (WHERE CFMZ6IQ - cpi_annual_rate < 0) AS months_losing,
+        -- only the months where existing easy access paid less than inflation
+        round(avg(CFMZ6IQ - cpi_annual_rate), 2) AS avg_real_return
+        -- the average of rate minus inflation over those months, in percentage points, to 2 decimals
+    FROM mart.monthly_rates_cpi
+    -- the table with savings rates and inflation in the same row
+    WHERE month BETWEEN '2016-01-01' AND '2026-08-01'
+    -- only the 128 complete months, January 2016 to August 2026
+"""))
+df = con.sql("SELECT month, CFMZ6IQ, cpi_annual_rate, CFMZ6IQ - cpi_annual_rate AS real_return FROM mart.monthly_rates_cpi WHERE month BETWEEN '2016-01-01' AND '2026-08-01' ORDER BY month").df()
+print(df)
+
+
+
+
+plt.plot(df["month"], df["CFMZ6IQ"], label="Existing easy access")
+plt.plot(df["month"], df["cpi_annual_rate"], label = "inflation")
+plt.plot(df["month"], df["real_return"], label = "real-return")
+plt.axhline(0, color="black")
+plt.legend()
+plt.show()
+
+plt.title("Existing easy access savers vs inflation, 2016 to 2026")
+plt.ylabel("% a year")
+
+Path("charts").mkdir(exist_ok=True)
+
+plt.savefig("charts/real_return.png", dpi=150)
+plt.show()
+con.close()
+
+
+print(con.sql("""
+    SELECT
+    -- four columns, one row per year
+        year(month) AS year,
+        -- the year each month belongs to
+        count(*) AS months,
+        -- how many months that year has in the window, 12 except 2026
+        count(*) FILTER (WHERE CFMZ6IQ - cpi_annual_rate < 0) AS months_losing,
+        -- how many of them savers earned less than inflation
+        round(avg(CFMZ6IQ - cpi_annual_rate) * 100) AS real_pounds_per_10k
+        -- that year's average real return in pounds on £10,000, negative is a loss
+    FROM mart.monthly_rates_cpi
+    -- the table with savings rates and inflation in the same row
+    WHERE month BETWEEN '2016-01-01' AND '2026-08-01'
+    -- the 128 complete months
+    GROUP BY year
+    -- one row per year
+    ORDER BY year
+    -- oldest year first
+"""))
+# finding 2, year by year

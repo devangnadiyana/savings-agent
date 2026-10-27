@@ -85,3 +85,32 @@ con.execute("""
 
 print(con.sql("SELECT count(*) AS n_months, min(month) AS first_month, max(month) AS last_month FROM mart.monthly_rates"))
 # How many months the table has, and its first and last month.
+
+con.execute("""
+    CREATE OR REPLACE TABLE staging.cpi AS
+    -- makes the table staging.cpi, replacing it if it already exists
+    SELECT
+        strptime(period, '%Y %b')::DATE AS month,
+        -- turns text like '1989 JAN' into a real date, 1989-01-01. %Y is the year, %b the month name
+        CAST(value AS DECIMAL(9, 4)) AS cpi_annual_rate
+        -- turns text like '4.9' into an exact number
+    FROM read_csv('data/raw/ons/cpi_annual_rate_D7G7.csv', header = false, names = ['period', 'value'], all_varchar = true)
+    -- reads the raw file: no header row, columns called period and value, everything kept as text
+    WHERE length(period) = 8
+    -- keeps only the monthly lines
+""")
+# runs the SQL above; it builds the table and prints nothing
+print(con.sql("SELECT count(*) AS n_months, min(month) AS first_month, max(month) AS last_month FROM staging.cpi"))
+# counts the months and shows the first and last, to check the load worked
+
+con.execute("""
+    CREATE OR REPLACE TABLE mart.monthly_rates_cpi AS
+    -- makes the table staging.cpi, replacing it if it already exists
+    SELECT * FROM
+        mart.monthly_rates LEFT JOIN staging.cpi
+        
+    USING(month)
+    ORDER BY month
+    
+""")
+print(con.sql("SELECT count(*), count(cpi_annual_rate) AS months_with_cpi FROM mart.monthly_rates_cpi"))
