@@ -1,37 +1,21 @@
 import os
-# The standard library for working with the operating system, e.g. changing folders.
+# the standard library for working with the operating system, here used to change folder
 from pathlib import Path
-# Path builds file locations.
+# Path builds file locations
+import duckdb
+# the database library
 
 os.chdir(Path(__file__).parent)
 # Path(__file__).parent is the folder this script lives in. os.chdir moves into that folder before anything else runs,
 # so "data/..." always points to your project's data folder, wherever the terminal happens to be.
-import duckdb #its a database library
 
-#opens the warehouse.duckdb file, if not present will create one
-con = duckdb.connect("data/warehouse.duckdb")#one file where duckdb keeps all the tables together, con holds the result of connect()
-#connect is 
-
-print("connected")#confirmation'
+con = duckdb.connect("data/warehouse.duckdb")
+# opens the warehouse file, or creates it if it isn't there. con is the open connection every query below uses
+print("connected")
+# confirms the connection opened
 
 con.execute("CREATE SCHEMA IF NOT EXISTS staging")
-
-print(con.execute("SELECT schema_name FROM information_schema.schemata WHERE catalog_name = current_database()").fetchall()) 
-print(con.sql("SELECT * FROM read_csv('data/raw/boe/series/IUDBEDR.csv') LIMIT 5"))
-# Reads the Bank Rate file straight from disk and prints its first 5 rows. Nothing is saved to the database yet.
-# Under each column name, DuckDB prints the type it guessed for that column.
-#main and staging: a schema is a named group of tables inside the database. main is the one every DuckDB database 
-# starts with. staging is the one you made, to hold the cleaned copies of your files.
-print(con.sql("""SELECT count(*) AS n_rows, max("DATE") AS latest_date FROM read_csv('data/raw/boe/series/IUDBEDR.csv')"""))
-# Counts every row in the file, and asks for the "largest" value in the DATE column.
-# The triple quotes """ let this text contain both kinds of quote mark: "DATE" (a column name) and '...' (a file path).
-
-#dates are in varchar so needs to be turned to date type
-
-print(con.sql("""SELECT max(strptime("DATE", '%d %b %Y')::DATE) AS latest_date FROM read_csv('data/raw/boe/series/IUDBEDR.csv')"""))
-# strptime(text, pattern) reads text as a date using the pattern you give it: %d = day number, %b = short month name, %Y = 4-digit year.
-# '%d %b %Y' matches "16 Oct 2026": day, space, month, space, year.
-# ::DATE turns the result into a real date, so max() now compares dates, not letters.
+# makes the staging folder if it doesn't exist yet, for cleaned copies of the raw files
 
 con.execute("""
     CREATE OR REPLACE TABLE staging.bank_rate AS
@@ -44,9 +28,7 @@ con.execute("""
     FROM read_csv('data/raw/boe/series/IUDBEDR.csv', header = true, all_varchar = true)
     -- header = true: the first line holds column names. all_varchar = true: read everything as text, so DuckDB guesses nothing and we convert it ourselves.
 """)
-print(con.sql("DESCRIBE staging.bank_rate"))
-# Shows the new table's columns and their types.
-
+# builds staging.bank_rate, an old second copy of daily Bank Rate that D1 T4 removes
 
 con.execute("""
     CREATE OR REPLACE TABLE staging.boe_series AS
@@ -63,8 +45,30 @@ con.execute("""
     -- names = [...]: each file calls its second column something different (IUDBEDR, IUMWTFA...), so every file gets the same two names. That's what lets them stack.
     -- filename = true adds a column holding the path of the file each row came from.
 """)
+# builds staging.boe_series, all 15 series stacked long
 print(con.sql("SELECT count(*) AS n_rows, count(DISTINCT series_code) AS n_series FROM staging.boe_series"))
 # Counts all the rows, and how many different series codes there are.
+
+con.execute("""
+    CREATE OR REPLACE TABLE staging.boe_monthly AS
+    SELECT
+        series_code,
+        date_trunc('month', obs_date)::DATE AS month,
+        CAST(avg(value) AS DECIMAL(9, 4)) AS value
+    FROM staging.boe_series
+    GROUP BY series_code, month
+""")
+# runs the SQL above on the open database connection
+# CREATE OR REPLACE TABLE builds staging.boe_monthly from the SELECT, replacing any old copy
+# SELECT starts the list of columns the new table will have
+# series_code keeps which series each row belongs to
+# date_trunc moves each date to the 1st of its month, ::DATE keeps it a plain date, AS month names it
+# avg averages each pile, CAST keeps it exact to 4 decimal places, AS value names it
+# FROM reads the long table staging.boe_series
+# GROUP BY makes one pile per series per month, so avg works pile by pile
+print(con.sql("SELECT count(*) AS n_rows FROM staging.boe_monthly"))
+# counts the rows of the monthly table
+
 con.execute("CREATE SCHEMA IF NOT EXISTS mart")
 # A second schema called 'mart', for finished tables that are ready for analysis and models.
 # 'staging' holds cleaned copies of the raw files; 'mart' holds what you build from them.
@@ -82,7 +86,6 @@ con.execute("""
     -- Oldest month first.
 """)
 # 'month' is the only column that isn't used in ON or USING, so PIVOT makes one row per month automatically.
-
 print(con.sql("SELECT count(*) AS n_months, min(month) AS first_month, max(month) AS last_month FROM mart.monthly_rates"))
 # How many months the table has, and its first and last month.
 
@@ -105,12 +108,17 @@ print(con.sql("SELECT count(*) AS n_months, min(month) AS first_month, max(month
 
 con.execute("""
     CREATE OR REPLACE TABLE mart.monthly_rates_cpi AS
-    -- makes the table staging.cpi, replacing it if it already exists
-    SELECT * FROM
-        mart.monthly_rates LEFT JOIN staging.cpi
-        
-    USING(month)
+    -- makes the table mart.monthly_rates_cpi, replacing it if it already exists
+    SELECT *
+    -- every column from both tables
+    FROM mart.monthly_rates LEFT JOIN staging.cpi USING (month)
+    -- keeps all 622 months and adds inflation to the months that have it, matching on month
     ORDER BY month
-    
+    -- oldest month first
 """)
-print(con.sql("SELECT count(*), count(cpi_annual_rate) AS months_with_cpi FROM mart.monthly_rates_cpi"))
+# builds the table that holds savings rates and inflation in the same row
+print(con.sql("SELECT count(*) AS n_months, count(cpi_annual_rate) AS months_with_cpi FROM mart.monthly_rates_cpi"))
+# all months, and how many of them have an inflation value
+
+con.close()
+# closes the warehouse, always the last line
